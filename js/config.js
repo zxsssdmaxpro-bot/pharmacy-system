@@ -7,7 +7,7 @@
  */
 const CONFIG = {
   // مثال: 'https://script.google.com/macros/s/AKfycb.../exec'
-  API_URL: 'https://script.google.com/macros/s/AKfycbw8YmUnEyY3S7d-f9KLpOP4jhCqSwQutNuh0sjSPzqISyWKQgl8GTJoom9rwYPDtJtktQ/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxYPhSCwFRAVt22e9aOLslNfuPiQpOHZv4HefZeAb0_/dev',
 
   APP_NAME: 'صيدليتي - نظام إدارة المخزن',
   VERSION: '1.0.0',
