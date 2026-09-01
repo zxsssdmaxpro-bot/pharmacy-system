@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>صيدليتي - نظام إدارة مخزن الصيدلية</title>
+<meta name="theme-color" content="#0d6e5c">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><rect width=%2224%22 height=%2224%22 rx=%226%22 fill=%22%230d6e5c%22/><text x=%2212%22 y=%2217%22 font-size=%2214%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22Arial%22>Rx</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+</head>
+<body>
+
+<!-- شاشة تسجيل الدخول -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo"><i data-lucide="pill" style="width:30px;height:30px"></i></div>
+    <h1>صيدليتي</h1>
+    <p class="sub">نظام إدارة مخزن الصيدلية</p>
+    <div id="login-error" class="login-error hidden"></div>
+    <form id="login-form">
+      <div class="form-field">
+        <label>اسم المستخدم</label>
+        <input name="username" type="text" required autocomplete="username" placeholder="admin">
+      </div>
+      <div class="form-field">
+        <label>كلمة المرور</label>
+        <input name="password" type="password" required autocomplete="current-password" placeholder="••••••••">
+      </div>
+      <button type="submit">تسجيل الدخول</button>
+    </form>
+    <p class="login-hint">الحساب الافتراضي عند أول تشغيل: admin / admin123<br>يرجى تغيير كلمة المرور فوراً من الإعدادات.</p>
+  </div>
+</div>
+
+<!-- هيكل التطبيق الرئيسي -->
+<div id="app-shell" class="hidden">
+  <aside id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon"><i data-lucide="pill"></i></div>
+      <div>
+        <strong>صيدليتي</strong>
+        <span>نظام إدارة المخزن</span>
+      </div>
+    </div>
+    <nav id="sidebar-nav"></nav>
+    <div class="sidebar-footer">
+      <div class="avatar" id="user-avatar">?</div>
+      <div>
+        <div id="user-name"></div>
+        <div id="user-role"></div>
+      </div>
+      <button id="logout-btn" title="تسجيل الخروج"><i data-lucide="log-out"></i></button>
+    </div>
+  </aside>
+
+  <div id="main-area">
+    <header id="topbar">
+      <button id="menu-toggle"><i data-lucide="menu"></i></button>
+      <h2 id="page-title">الرئيسية</h2>
+      <button id="theme-toggle-top" onclick="App.toggleTheme()"><i data-lucide="moon"></i></button>
+    </header>
+    <main id="page-content"></main>
+    <footer style="padding:16px 20px;color:var(--text-muted);font-size:11.5px">
+      © <span id="year"></span> صيدليتي — جميع البيانات محفوظة على Google Sheets الخاصة بك
+    </footer>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<!-- الإعدادات والأدوات الأساسية -->
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/api.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/scanner.js"></script>
+<script src="js/router.js"></script>
+
+<!-- الصفحات -->
+<script src="js/pages/common.js"></script>
+<script src="js/pages/dashboard.js"></script>
+<script src="js/pages/medicines.js"></script>
+<script src="js/pages/stockIn.js"></script>
+<script src="js/pages/stockOut.js"></script>
+<script src="js/pages/inventory.js"></script>
+<script src="js/pages/inventoryCount.js"></script>
+<script src="js/pages/suppliers.js"></script>
+<script src="js/pages/reports.js"></script>
+<script src="js/pages/activityLog.js"></script>
+<script src="js/pages/users.js"></script>
+<script src="js/pages/settings.js"></script>
+
+<!-- التطبيق الرئيسي -->
+<script src="js/app.js"></script>
+</body>
+</html>

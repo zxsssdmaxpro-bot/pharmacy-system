@@ -1,0 +1,25 @@
+{
+  "name": "صيدليتي - نظام إدارة مخزن الصيدلية",
+  "short_name": "صيدليتي",
+  "description": "نظام إدارة مخزون الصيدلية مع مسح الباركود ومزامنة Google Sheets",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d6e5c",
+  "theme_color": "#0d6e5c",
+  "dir": "rtl",
+  "lang": "ar",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='36' fill='%230d6e5c'/><text x='96' y='128' font-size='96' fill='white' text-anchor='middle' font-family='Arial'>Rx</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='96' fill='%230d6e5c'/><text x='256' y='340' font-size='256' fill='white' text-anchor='middle' font-family='Arial'>Rx</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

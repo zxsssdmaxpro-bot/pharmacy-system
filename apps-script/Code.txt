@@ -1,0 +1,532 @@
+/**
+ * ============================================================
+ *  نظام إدارة مخزن الصيدلية - Google Apps Script Backend
+ * ============================================================
+ * هذا الملف يعمل كـ REST API آمن يربط الموقع بـ Google Sheets.
+ *
+ * طريقة النشر (راجع ملف SETUP.md لتفاصيل كاملة):
+ * 1) افتح Google Sheet جديد أو استخدم SS_ID أدناه.
+ * 2) Extensions > Apps Script، الصق هذا الكود.
+ * 3) شغّل الدالة setupSheets() مرة واحدة لإنشاء كل الجداول تلقائياً.
+ * 4) Deploy > New deployment > Web app
+ *      - Execute as: Me
+ *      - Who has access: Anyone
+ * 5) انسخ رابط الـ Web App وضعه في js/config.js داخل الموقع (API_URL).
+ * ============================================================
+ */
+
+// ------------------------------------------------------------
+// الإعدادات العامة
+// ------------------------------------------------------------
+
+// اتركه فارغاً "" ليستخدم السكربت الشيت المرتبطة به تلقائياً (Container-bound)،
+// أو ضع معرف الشيت هنا إن كان السكربت مستقلاً (Standalone script).
+const SS_ID = '';
+
+const SHEETS = {
+  MEDICINES: 'Medicines',
+  BATCHES: 'Batches',
+  MOVEMENTS: 'StockMovements',
+  SUPPLIERS: 'Suppliers',
+  USERS: 'Users',
+  LOG: 'ActivityLog',
+  SETTINGS: 'Settings',
+};
+
+// تعريف أعمدة كل جدول بالترتيب - هذا هو "سكيمة" قاعدة البيانات
+const SCHEMA = {
+  Medicines: ['ID', 'Name', 'ScientificName', 'Manufacturer', 'Category', 'Form',
+    'Concentration', 'PackageSize', 'Barcode', 'QRCode', 'ItemNumber',
+    'PurchasePrice', 'SalePrice', 'MinStock', 'StorageLocation', 'SupplierID',
+    'Notes', 'TotalQuantity', 'Archived', 'CreatedAt', 'UpdatedAt'],
+  Batches: ['ID', 'MedicineID', 'BatchNumber', 'Quantity', 'ProductionDate',
+    'ExpiryDate', 'PurchasePrice', 'SupplierID', 'StorageLocation', 'Archived', 'CreatedAt'],
+  StockMovements: ['ID', 'Type', 'MedicineID', 'MedicineName', 'BatchID', 'BatchNumber',
+    'Quantity', 'Reason', 'UserID', 'UserName', 'Date', 'Notes'],
+  Suppliers: ['ID', 'Name', 'Phone', 'Address', 'Email', 'Notes', 'CreatedAt'],
+  Users: ['ID', 'Name', 'Username', 'PasswordHash', 'Role', 'Active', 'CreatedAt', 'LastLogin'],
+  ActivityLog: ['ID', 'UserID', 'UserName', 'Action', 'Entity', 'Details', 'Date'],
+  Settings: ['Key', 'Value'],
+};
+
+// ------------------------------------------------------------
+// إعداد الجداول تلقائياً (تُشغَّل مرة واحدة يدوياً من محرر Apps Script)
+// ------------------------------------------------------------
+function setupSheets() {
+  const ss = getSS_();
+  Object.keys(SCHEMA).forEach(function (name) {
+    let sheet = ss.getSheetByName(name);
+    if (!sheet) sheet = ss.insertSheet(name);
+    if (sheet.getLastRow() === 0) {
+      sheet.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]);
+      sheet.setFrozenRows(1);
+      sheet.getRange(1, 1, 1, SCHEMA[name].length).setFontWeight('bold').setBackground('#0d6e5c').setFontColor('#ffffff');
+    }
+  });
+
+  // حذف الشيت الافتراضي "Sheet1" إن وجد وكان فارغاً
+  const def = ss.getSheetByName('Sheet1');
+  if (def && def.getLastRow() === 0) ss.deleteSheet(def);
+
+  // إنشاء مستخدم مدير افتراضي إن لم يوجد أي مستخدم
+  const usersSheet = ss.getSheetByName(SHEETS.USERS);
+  if (usersSheet.getLastRow() === 1) {
+    appendRow_(usersSheet, {
+      ID: 'U-' + Date.now(),
+      Name: 'مدير النظام',
+      Username: 'admin',
+      PasswordHash: hashPassword_('admin123'),
+      Role: 'admin',
+      Active: true,
+      CreatedAt: new Date().toISOString(),
+      LastLogin: '',
+    });
+  }
+
+  // إعدادات افتراضية
+  const settingsSheet = ss.getSheetByName(SHEETS.SETTINGS);
+  if (settingsSheet.getLastRow() === 1) {
+    appendRow_(settingsSheet, { Key: 'pharmacy_name', Value: 'صيدليتي' });
+    appendRow_(settingsSheet, { Key: 'expiry_alert_days', Value: '90' });
+    appendRow_(settingsSheet, { Key: 'low_stock_default', Value: '10' });
+  }
+
+  Logger.log('تم إعداد الجداول بنجاح. اسم الدخول الافتراضي: admin / admin123 (يرجى تغييرها فوراً)');
+}
+
+function getSS_() {
+  return SS_ID ? SpreadsheetApp.openById(SS_ID) : SpreadsheetApp.getActiveSpreadsheet();
+}
+
+// ------------------------------------------------------------
+// نقاط الدخول HTTP
+// ------------------------------------------------------------
+function doGet(e) {
+  try {
+    const action = e.parameter.action || 'list';
+    const sheet = e.parameter.sheet;
+    let result;
+
+    switch (action) {
+      case 'list':
+        result = listRecords_(sheet, e.parameter);
+        break;
+      case 'dashboard':
+        result = getDashboardStats_();
+        break;
+      case 'search':
+        result = searchMedicines_(e.parameter.q || '');
+        break;
+      case 'ping':
+        result = { ok: true, time: new Date().toISOString() };
+        break;
+      default:
+        return jsonOut_({ success: false, error: 'إجراء غير معروف: ' + action });
+    }
+    return jsonOut_({ success: true, data: result });
+  } catch (err) {
+    return jsonOut_({ success: false, error: err.message });
+  }
+}
+
+function doPost(e) {
+  try {
+    // نقرأ الجسم كنص عادي (text/plain) لتفادي مشاكل CORS preflight من المتصفح
+    const body = JSON.parse(e.postData.contents);
+    const action = body.action;
+    let result;
+
+    switch (action) {
+      case 'login':
+        result = login_(body.username, body.password);
+        break;
+      case 'create':
+        result = createRecord_(body.sheet, body.data, body.user);
+        break;
+      case 'update':
+        result = updateRecord_(body.sheet, body.id, body.data, body.user);
+        break;
+      case 'delete': // Soft delete دائماً (أرشفة)
+        result = archiveRecord_(body.sheet, body.id, body.user);
+        break;
+      case 'stockIn':
+        result = stockIn_(body.data, body.user);
+        break;
+      case 'stockOut':
+        result = stockOut_(body.data, body.user);
+        break;
+      case 'transferStock':
+        result = transferStock_(body.data, body.user);
+        break;
+      case 'inventoryCount':
+        result = inventoryCount_(body.data, body.user);
+        break;
+      case 'syncBatch': // مزامنة عمليات مجمّعة من وضع Offline
+        result = syncBatch_(body.operations, body.user);
+        break;
+      default:
+        return jsonOut_({ success: false, error: 'إجراء غير معروف: ' + action });
+    }
+    return jsonOut_({ success: true, data: result });
+  } catch (err) {
+    return jsonOut_({ success: false, error: err.message });
+  }
+}
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ------------------------------------------------------------
+// أدوات مساعدة عامة على الجداول (CRUD ديناميكي)
+// ------------------------------------------------------------
+function getSheet_(name) {
+  const sheet = getSS_().getSheetByName(name);
+  if (!sheet) throw new Error('الجدول غير موجود: ' + name);
+  return sheet;
+}
+
+function sheetToObjects_(sheet) {
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const headers = values[0];
+  const rows = values.slice(1);
+  return rows
+    .map(function (row) {
+      const obj = {};
+      headers.forEach(function (h, i) { obj[h] = row[i]; });
+      return obj;
+    })
+    .filter(function (obj) { return obj.ID !== '' && obj.ID !== undefined; });
+}
+
+function appendRow_(sheet, obj) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const row = headers.map(function (h) { return obj[h] !== undefined ? obj[h] : ''; });
+  sheet.appendRow(row);
+}
+
+function findRowIndexById_(sheet, id) {
+  const values = sheet.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][0]) === String(id)) return i + 1; // رقم الصف الفعلي (1-indexed)
+  }
+  return -1;
+}
+
+function listRecords_(sheetName, params) {
+  const sheet = getSheet_(sheetName);
+  let records = sheetToObjects_(sheet);
+  if (params && params.includeArchived !== 'true') {
+    records = records.filter(function (r) { return r.Archived !== true && r.Archived !== 'TRUE'; });
+  }
+  return records;
+}
+
+function createRecord_(sheetName, data, user) {
+  const sheet = getSheet_(sheetName);
+  const id = data.ID || (sheetPrefix_(sheetName) + '-' + Date.now());
+  data.ID = id;
+  data.CreatedAt = new Date().toISOString();
+  data.Archived = false;
+  appendRow_(sheet, data);
+  logActivity_(user, 'إضافة', sheetName, 'تمت إضافة سجل جديد: ' + id);
+  recalcMedicineTotals_(sheetName, data.MedicineID);
+  return data;
+}
+
+function updateRecord_(sheetName, id, data, user) {
+  const sheet = getSheet_(sheetName);
+  const rowIndex = findRowIndexById_(sheet, id);
+  if (rowIndex === -1) throw new Error('السجل غير موجود: ' + id);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  data.UpdatedAt = new Date().toISOString();
+  headers.forEach(function (h, i) {
+    if (data[h] !== undefined) sheet.getRange(rowIndex, i + 1).setValue(data[h]);
+  });
+  logActivity_(user, 'تعديل', sheetName, 'تم تعديل السجل: ' + id);
+  return data;
+}
+
+function archiveRecord_(sheetName, id, user) {
+  const sheet = getSheet_(sheetName);
+  const rowIndex = findRowIndexById_(sheet, id);
+  if (rowIndex === -1) throw new Error('السجل غير موجود: ' + id);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const archivedCol = headers.indexOf('Archived') + 1;
+  if (archivedCol > 0) sheet.getRange(rowIndex, archivedCol).setValue(true);
+  logActivity_(user, 'أرشفة/حذف', sheetName, 'تمت أرشفة السجل: ' + id);
+  return { id: id, archived: true };
+}
+
+function sheetPrefix_(sheetName) {
+  const map = { Medicines: 'MED', Batches: 'BAT', StockMovements: 'MOV', Suppliers: 'SUP', Users: 'USR' };
+  return map[sheetName] || 'REC';
+}
+
+// ------------------------------------------------------------
+// المصادقة (تسجيل الدخول)
+// ------------------------------------------------------------
+function hashPassword_(pw) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, pw);
+  return digest.map(function (b) { return (b < 0 ? b + 256 : b).toString(16).padStart(2, '0'); }).join('');
+}
+
+function login_(username, password) {
+  const sheet = getSheet_(SHEETS.USERS);
+  const users = sheetToObjects_(sheet);
+  const hash = hashPassword_(password);
+  const user = users.find(function (u) {
+    return u.Username === username && u.PasswordHash === hash && String(u.Active) !== 'false';
+  });
+  if (!user) throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة');
+
+  const rowIndex = findRowIndexById_(sheet, user.ID);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  sheet.getRange(rowIndex, headers.indexOf('LastLogin') + 1).setValue(new Date().toISOString());
+
+  logActivity_({ id: user.ID, name: user.Name }, 'تسجيل دخول', 'Users', user.Name + ' سجل الدخول');
+  delete user.PasswordHash;
+  return user;
+}
+
+// ------------------------------------------------------------
+// سجل العمليات (Audit Log)
+// ------------------------------------------------------------
+function logActivity_(user, action, entity, details) {
+  try {
+    const sheet = getSheet_(SHEETS.LOG);
+    appendRow_(sheet, {
+      ID: 'LOG-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+      UserID: user && (user.id || user.ID) || 'system',
+      UserName: user && (user.name || user.Name) || 'النظام',
+      Action: action,
+      Entity: entity,
+      Details: details,
+      Date: new Date().toISOString(),
+    });
+  } catch (e) { /* لا نوقف العملية الأساسية بسبب فشل تسجيل اللوق */ }
+}
+
+// ------------------------------------------------------------
+// البحث الذكي عن الأدوية
+// ------------------------------------------------------------
+function searchMedicines_(query) {
+  const meds = sheetToObjects_(getSheet_(SHEETS.MEDICINES)).filter(function (m) { return !m.Archived; });
+  if (!query) return meds;
+  const q = query.toString().trim().toLowerCase();
+  return meds.filter(function (m) {
+    return ['Name', 'ScientificName', 'Manufacturer', 'Barcode', 'QRCode', 'ItemNumber']
+      .some(function (f) { return String(m[f] || '').toLowerCase().indexOf(q) !== -1; });
+  });
+}
+
+// ------------------------------------------------------------
+// حركة المخزون: إدخال / إخراج / نقل / جرد
+// ------------------------------------------------------------
+function stockIn_(data, user) {
+  // data: { medicineId, batchNumber, quantity, productionDate, expiryDate, supplierId, purchasePrice, storageLocation, notes }
+  const batchSheet = getSheet_(SHEETS.BATCHES);
+  const batchId = 'BAT-' + Date.now();
+  const batch = {
+    ID: batchId,
+    MedicineID: data.medicineId,
+    BatchNumber: data.batchNumber,
+    Quantity: Number(data.quantity),
+    ProductionDate: data.productionDate || '',
+    ExpiryDate: data.expiryDate,
+    PurchasePrice: data.purchasePrice || 0,
+    SupplierID: data.supplierId || '',
+    StorageLocation: data.storageLocation || '',
+    Archived: false,
+    CreatedAt: new Date().toISOString(),
+  };
+  appendRow_(batchSheet, batch);
+
+  const med = getMedicineById_(data.medicineId);
+  logMovement_('IN', data.medicineId, med ? med.Name : '', batchId, data.batchNumber,
+    Number(data.quantity), data.reason || 'إدخال مخزون', user, data.notes || '');
+
+  updateMedicineQuantity_(data.medicineId, Number(data.quantity));
+  logActivity_(user, 'إدخال مخزون', 'StockMovements', 'إدخال ' + data.quantity + ' من ' + (med ? med.Name : data.medicineId));
+  return { batch: batch };
+}
+
+function stockOut_(data, user) {
+  // data: { medicineId, quantity, reason, batchId(اختياري - وإلا FEFO تلقائي), notes }
+  const med = getMedicineById_(data.medicineId);
+  if (!med) throw new Error('الدواء غير موجود');
+
+  let remaining = Number(data.quantity);
+  if (remaining > Number(med.TotalQuantity || 0)) {
+    throw new Error('الكمية المطلوبة أكبر من الكمية المتاحة في المخزون (' + med.TotalQuantity + ')');
+  }
+
+  const batchSheet = getSheet_(SHEETS.BATCHES);
+  let batches = sheetToObjects_(batchSheet).filter(function (b) {
+    return String(b.MedicineID) === String(data.medicineId) && !b.Archived && Number(b.Quantity) > 0;
+  });
+
+  // FEFO: الأقرب انتهاءً أولاً
+  batches.sort(function (a, b) { return new Date(a.ExpiryDate) - new Date(b.ExpiryDate); });
+
+  if (data.batchId) {
+    batches = batches.filter(function (b) { return String(b.ID) === String(data.batchId) })
+      .concat(batches.filter(function (b) { return String(b.ID) !== String(data.batchId) }));
+  }
+
+  const usedBatches = [];
+  for (let i = 0; i < batches.length && remaining > 0; i++) {
+    const b = batches[i];
+    const take = Math.min(remaining, Number(b.Quantity));
+    const rowIndex = findRowIndexById_(batchSheet, b.ID);
+    const headers = batchSheet.getRange(1, 1, 1, batchSheet.getLastColumn()).getValues()[0];
+    batchSheet.getRange(rowIndex, headers.indexOf('Quantity') + 1).setValue(Number(b.Quantity) - take);
+    usedBatches.push({ batchId: b.ID, batchNumber: b.BatchNumber, quantity: take, expiryDate: b.ExpiryDate });
+    remaining -= take;
+
+    logMovement_('OUT', data.medicineId, med.Name, b.ID, b.BatchNumber, take, data.reason || 'إخراج مخزون', user, data.notes || '');
+  }
+
+  updateMedicineQuantity_(data.medicineId, -Number(data.quantity));
+  logActivity_(user, 'إخراج مخزون', 'StockMovements', 'إخراج ' + data.quantity + ' من ' + med.Name);
+  return { usedBatches: usedBatches };
+}
+
+function transferStock_(data, user) {
+  // نقل بين مخازن (مستقبلي) - يسجَّل كحركتين IN/OUT بنفس المرجع
+  logActivity_(user, 'نقل مخزون', 'StockMovements',
+    'نقل ' + data.quantity + ' من ' + data.medicineId + ' من مخزن ' + data.fromWarehouse + ' إلى ' + data.toWarehouse);
+  return { transferred: true };
+}
+
+function inventoryCount_(data, user) {
+  // data: { medicineId, actualQuantity, reason }
+  const med = getMedicineById_(data.medicineId);
+  if (!med) throw new Error('الدواء غير موجود');
+  const diff = Number(data.actualQuantity) - Number(med.TotalQuantity || 0);
+  updateMedicineQuantity_(data.medicineId, diff);
+  logMovement_(diff >= 0 ? 'IN' : 'OUT', data.medicineId, med.Name, '', 'جرد',
+    Math.abs(diff), 'تسوية جرد: ' + (data.reason || ''), user, '');
+  logActivity_(user, 'جرد', 'Medicines', 'تسوية جرد لـ ' + med.Name + ' بفارق ' + diff);
+  return { difference: diff };
+}
+
+function syncBatch_(operations, user) {
+  const results = [];
+  (operations || []).forEach(function (op) {
+    try {
+      let r;
+      if (op.action === 'stockIn') r = stockIn_(op.data, user);
+      else if (op.action === 'stockOut') r = stockOut_(op.data, user);
+      else if (op.action === 'create') r = createRecord_(op.sheet, op.data, user);
+      results.push({ success: true, opId: op.opId, result: r });
+    } catch (err) {
+      results.push({ success: false, opId: op.opId, error: err.message });
+    }
+  });
+  return results;
+}
+
+// ------------------------------------------------------------
+// أدوات مساعدة للأدوية والكميات
+// ------------------------------------------------------------
+function getMedicineById_(id) {
+  const meds = sheetToObjects_(getSheet_(SHEETS.MEDICINES));
+  return meds.find(function (m) { return String(m.ID) === String(id); });
+}
+
+function updateMedicineQuantity_(medicineId, delta) {
+  const sheet = getSheet_(SHEETS.MEDICINES);
+  const rowIndex = findRowIndexById_(sheet, medicineId);
+  if (rowIndex === -1) return;
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const qtyCol = headers.indexOf('TotalQuantity') + 1;
+  const current = Number(sheet.getRange(rowIndex, qtyCol).getValue()) || 0;
+  sheet.getRange(rowIndex, qtyCol).setValue(current + delta);
+  sheet.getRange(rowIndex, headers.indexOf('UpdatedAt') + 1).setValue(new Date().toISOString());
+}
+
+function recalcMedicineTotals_(sheetName, medicineId) {
+  // محجوزة للاستخدام المستقبلي لو أردنا حساب المجموع من الدفعات مباشرة
+  return;
+}
+
+function logMovement_(type, medicineId, medicineName, batchId, batchNumber, quantity, reason, user, notes) {
+  const sheet = getSheet_(SHEETS.MOVEMENTS);
+  appendRow_(sheet, {
+    ID: 'MOV-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+    Type: type,
+    MedicineID: medicineId,
+    MedicineName: medicineName,
+    BatchID: batchId,
+    BatchNumber: batchNumber,
+    Quantity: quantity,
+    Reason: reason,
+    UserID: user && (user.id || user.ID) || '',
+    UserName: user && (user.name || user.Name) || '',
+    Date: new Date().toISOString(),
+    Notes: notes || '',
+  });
+}
+
+// ------------------------------------------------------------
+// إحصائيات لوحة التحكم
+// ------------------------------------------------------------
+function getDashboardStats_() {
+  const meds = sheetToObjects_(getSheet_(SHEETS.MEDICINES)).filter(function (m) { return !m.Archived; });
+  const batches = sheetToObjects_(getSheet_(SHEETS.BATCHES)).filter(function (b) { return !b.Archived; });
+  const movements = sheetToObjects_(getSheet_(SHEETS.MOVEMENTS));
+
+  const now = new Date();
+  const alertDays = Number(getSetting_('expiry_alert_days') || 90);
+  const soonLimit = new Date(now.getTime() + alertDays * 24 * 60 * 60 * 1000);
+
+  let totalQuantity = 0, lowStock = 0, expiringSoon = 0, expired = 0, totalValue = 0;
+  const seenBatchMed = {};
+
+  meds.forEach(function (m) {
+    const qty = Number(m.TotalQuantity || 0);
+    totalQuantity += qty;
+    totalValue += qty * Number(m.SalePrice || 0);
+    if (qty <= Number(m.MinStock || 0)) lowStock++;
+  });
+
+  batches.forEach(function (b) {
+    if (Number(b.Quantity) <= 0) return;
+    const exp = new Date(b.ExpiryDate);
+    if (exp < now) expired++;
+    else if (exp <= soonLimit) expiringSoon++;
+  });
+
+  const recentMovements = movements
+    .sort(function (a, b) { return new Date(b.Date) - new Date(a.Date); })
+    .slice(0, 10);
+
+  // أكثر/أقل الأدوية حركة (بناءً على حركات الإخراج)
+  const outCounts = {};
+  movements.filter(function (m) { return m.Type === 'OUT'; }).forEach(function (m) {
+    outCounts[m.MedicineName] = (outCounts[m.MedicineName] || 0) + Number(m.Quantity);
+  });
+  const sortedOut = Object.keys(outCounts).map(function (k) { return { name: k, quantity: outCounts[k] }; })
+    .sort(function (a, b) { return b.quantity - a.quantity; });
+
+  return {
+    totalItems: meds.length,
+    totalQuantity: totalQuantity,
+    lowStock: lowStock,
+    expiringSoon: expiringSoon,
+    expired: expired,
+    totalValue: totalValue,
+    recentMovements: recentMovements,
+    topMoving: sortedOut.slice(0, 5),
+    leastMoving: sortedOut.slice(-5).reverse(),
+  };
+}
+
+function getSetting_(key) {
+  const settings = sheetToObjects_(getSheet_(SHEETS.SETTINGS));
+  const row = settings.find(function (s) { return s.Key === key; });
+  return row ? row.Value : null;
+}
